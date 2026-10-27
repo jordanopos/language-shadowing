@@ -16,6 +16,15 @@ async function fetchTranslation(text) {
 }
 import { getLesson, saveLesson } from '../../lib/lesson-store';
 
+// A lesson might have a video track if it's a video container. Some of these
+// (e.g. .webm / .mp4) can also be audio-only, so we confirm on
+// loadedmetadata by checking videoWidth before showing the player.
+function mightHaveVideo(lesson) {
+  const type = lesson?.blob?.type || '';
+  if (type.startsWith('video/')) return true;
+  return /\.(mp4|m4v|mov|webm|mkv|ogv)$/i.test(lesson?.fileName || '');
+}
+
 export default function PracticePage() {
   const router = useRouter();
   const canvasRef = useRef(null);
@@ -34,6 +43,11 @@ export default function PracticePage() {
   const sourceRef = useRef(null);
   const lastTickRef = useRef(0);
   const lessonRef = useRef(null);
+  // Optional video layer. It's always muted: the Web Audio buffer stays the
+  // single source of sound and timing, and the video just follows it.
+  const videoRef = useRef(null);
+  const [videoUrl, setVideoUrl] = useState('');
+  const [hasVideo, setHasVideo] = useState(false);
   const [lesson, setLesson] = useState(null);
   const [active, setActive] = useState(0);
   const [done, setDone] = useState(new Set());
@@ -82,6 +96,8 @@ export default function PracticePage() {
   }, [translations, persist]);
 
   useEffect(() => {
+    let objectUrl = '';
+    let disposed = false;
     (async () => {
       const id = sessionStorage.getItem('shadow-active-lesson');
       if (!id) { router.replace('/'); return; }
@@ -91,6 +107,10 @@ export default function PracticePage() {
       setLesson(saved);
       setDone(new Set(saved.done || []));
       setTranslations(saved.translations || {});
+      if (!disposed && saved.blob && mightHaveVideo(saved)) {
+        objectUrl = URL.createObjectURL(saved.blob);
+        setVideoUrl(objectUrl);
+      }
 
       // Decode the whole file once into a raw AudioBuffer. This is what we
       // play segments from — no seeking a compressed stream, so no
@@ -115,6 +135,7 @@ export default function PracticePage() {
       }
     })().catch(() => setError('Could not open this saved lesson. Please upload the file again.'));
     return () => {
+      disposed = true;
       cancelAnimationFrame(audioRafRef.current);
       window.clearTimeout(fadeTimerRef.current);
       window.clearTimeout(endTimerRef.current);
@@ -122,6 +143,8 @@ export default function PracticePage() {
       try { sourceRef.current?.stop(); } catch { /* already stopped */ }
       sourceRef.current = null;
       audioContextRef.current?.close();
+      try { videoRef.current?.pause(); } catch { /* no video */ }
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [router]);
 
@@ -216,6 +239,35 @@ export default function PracticePage() {
     }
   }, [ensureAudioContext, markComplete, silence, stopMic]);
 
+  // ── Video sync helpers ─────────────────────────────────────────────────────
+  // The video never drives playback; it's only told where the audio is.
+  const seekVideo = useCallback((seconds) => {
+    const video = videoRef.current;
+    if (!video || !hasVideo) return;
+    try { video.currentTime = Math.max(0, seconds); } catch { /* not seekable yet */ }
+  }, [hasVideo]);
+  const startVideo = useCallback((seconds, rate) => {
+    const video = videoRef.current;
+    if (!video || !hasVideo) return;
+    try {
+      video.playbackRate = rate;
+      video.currentTime = Math.max(0, seconds);
+      const p = video.play();
+      if (p?.catch) p.catch(() => { /* autoplay blocked / interrupted — audio continues */ });
+    } catch { /* ignore */ }
+  }, [hasVideo]);
+  const pauseVideo = useCallback(() => {
+    try { videoRef.current?.pause(); } catch { /* no video */ }
+  }, []);
+  const syncVideo = useCallback((seconds) => {
+    const video = videoRef.current;
+    if (!video || !hasVideo || video.seeking || video.paused) return;
+    // Only hard-correct noticeable drift; constant tiny seeks would stutter.
+    if (Math.abs(video.currentTime - seconds) > 0.25) {
+      try { video.currentTime = seconds; } catch { /* ignore */ }
+    }
+  }, [hasVideo]);
+
   const playRef = useRef(null);
   const FADE = 0.012;
   const playSegment = useCallback(async (index = active) => {
@@ -282,6 +334,7 @@ export default function PracticePage() {
         cancelAnimationFrame(audioRafRef.current);
         window.clearTimeout(endTimerRef.current);
         if (sourceRef.current === source) sourceRef.current = null;
+        pauseVideo();
         if (count < repeat) window.setTimeout(playOnce, 30);
         else { setStatus('listening'); beginMic(token); }
       };
@@ -291,6 +344,7 @@ export default function PracticePage() {
 
       try { source.start(now, clipStart, clipDuration); }
       catch { setStatus('paused'); setError('Could not play this media in your browser.'); return; }
+      startVideo(clipStart, rate);
 
       const tick = () => {
         if (token !== tokenRef.current) return;
@@ -305,13 +359,14 @@ export default function PracticePage() {
         if (nowMs - lastTickRef.current >= 50) {
           lastTickRef.current = nowMs;
           setTime(Math.min(segment.end, clipStart + elapsed));
+          syncVideo(clipStart + elapsed);
         }
         audioRafRef.current = requestAnimationFrame(tick);
       };
       audioRafRef.current = requestAnimationFrame(tick);
     };
     playOnce();
-  }, [active, beginMic, ensureAudioContext, repeat, speed, stopMic]);
+  }, [active, beginMic, ensureAudioContext, pauseVideo, repeat, speed, startVideo, stopMic, syncVideo]);
   playRef.current = playSegment;
 
   const pause = useCallback(() => {
@@ -330,16 +385,17 @@ export default function PracticePage() {
       fadeTimerRef.current = window.setTimeout(() => { try { source.stop(); } catch { /* already stopped */ } }, 15);
     }
     sourceRef.current = null;
+    pauseVideo();
     stopMic(); setStatus('paused'); setMicMessage('Paused. Press play when you’re ready.');
-  }, [stopMic]);
+  }, [pauseVideo, stopMic]);
   const goTo = useCallback((index, start = true) => {
     const end = lessonRef.current?.segments?.length || 0;
     if (!end) return;
     const next = Math.max(0, Math.min(end - 1, index));
     stopMic(); tokenRef.current++;
     activeRef.current = next; setActive(next); setTime(lessonRef.current.segments[next].start);
-    if (start) playRef.current(next); else pause();
-  }, [pause, stopMic]);
+    if (start) playRef.current(next); else { pause(); seekVideo(lessonRef.current.segments[next].start); }
+  }, [pause, seekVideo, stopMic]);
 
   useEffect(() => {
     function keydown(event) {
@@ -384,7 +440,7 @@ export default function PracticePage() {
     const rect = e.currentTarget.getBoundingClientRect();
     const point = (e.clientX - rect.left) / rect.width * duration;
     const found = lesson?.segments.findIndex(item => point >= item.start && point <= item.end) ?? -1;
-    if (found >= 0) { goTo(found, false); setTime(point); }
+    if (found >= 0) { goTo(found, false); setTime(point); seekVideo(point); }
   }
   async function refreshTranscription() {
     const saved = lessonRef.current;
@@ -416,7 +472,23 @@ export default function PracticePage() {
     <div className="practice-shell">
       <div className="practice-title-row"><h1 contentEditable suppressContentEditableWarning onBlur={e => updateTitle(e.currentTarget.textContent)}>{lesson.title}</h1><span className={`status-pill ${status} ${showStatus ? '' : 'status-off'}`}><i/>{status === 'complete' ? 'Lesson complete' : status[0].toUpperCase() + status.slice(1)}</span></div>
       {error && <div className="inline-error">{error}</div>}
-      <section className="player-card"><div className="wave-row"><button className="big-play" onClick={() => status === 'playing' ? pause() : playSegment()} aria-label={status === 'playing' ? 'Pause' : 'Play'}>{status === 'playing' ? 'Ⅱ' : '▶'}</button><button className="wave-wrap" onClick={seek} aria-label="Seek to a point in the audio"><canvas ref={canvasRef}/><i className="playhead" style={{ left: `${duration ? time / duration * 100 : 0}%` }}/><span className="wave-time">{formatTime(time)} / {formatTime(duration)}</span></button></div>
+      <section className="player-card">{videoUrl && <div className={`video-stage ${hasVideo ? '' : 'video-hidden'}`} onClick={() => status === 'playing' ? pause() : playSegment()}><video
+          ref={videoRef}
+          src={videoUrl}
+          muted
+          playsInline
+          preload="auto"
+          disablePictureInPicture
+          aria-label="Lesson video"
+          onLoadedMetadata={e => {
+            const v = e.currentTarget;
+            if (v.videoWidth > 0 && v.videoHeight > 0) {
+              setHasVideo(true);
+              // Show the first frame of the current phrase instead of a black box.
+              try { v.currentTime = Math.max(0.001, lessonRef.current?.segments?.[activeRef.current]?.start || 0); } catch { /* ignore */ }
+            }
+          }}
+        /></div>}<div className="wave-row"><button className="big-play" onClick={() => status === 'playing' ? pause() : playSegment()} aria-label={status === 'playing' ? 'Pause' : 'Play'}>{status === 'playing' ? 'Ⅱ' : '▶'}</button><button className="wave-wrap" onClick={seek} aria-label="Seek to a point in the audio"><canvas ref={canvasRef}/><i className="playhead" style={{ left: `${duration ? time / duration * 100 : 0}%` }}/><span className="wave-time">{formatTime(time)} / {formatTime(duration)}</span></button></div>
         <div className="player-bar"><div className="control-pill"><span>↻</span><select value={repeat} onChange={e => setRepeat(+e.target.value)} aria-label="Repeat count"><option value="1">1×</option><option value="2">2×</option><option value="3">3×</option></select></div><div className="control-pill"><span>»</span><select value={speed} onChange={e => setSpeed(+e.target.value)} aria-label="Playback speed"><option value="0.5">0.50x</option><option value="0.75">0.75x</option><option value="0.9">0.90x</option><option value="1">1.00x</option><option value="1.1">1.10x</option><option value="1.25">1.25x</option><option value="1.5">1.50x</option></select></div><span className="bar-spacer"/><button className="bar-button" onClick={() => setShowText(!showText)}>{showText ? 'Hide text' : 'Show text'}</button><button className="bar-button green-button" onClick={() => { const next = !automatic; automaticRef.current = next; setAutomatic(next); }}>{automatic ? 'Auto' : 'Manual'}</button><button className="bar-button green-button" onClick={() => setShowStatus(!showStatus)}>{showStatus ? 'Hide Status' : 'Show Status'}</button></div>
       </section>
       <section className={`practice-content ${showText ? '' : 'text-hidden'}`}><div className="transcript-card"><div className="transcript-header"><h2>Transcript <span>·</span> <small>{rows.length} sentences</small></h2><span>Click a sentence to practice it</span></div><TranscriptList rows={rows} active={active} done={done} onSelect={goTo} translations={translations} onTranslate={translateSegment}/></div>
