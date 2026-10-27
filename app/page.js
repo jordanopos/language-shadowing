@@ -3,6 +3,7 @@
 import { useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { saveLesson } from '../lib/lesson-store';
+import FeatureTabs from './_components/FeatureTabs';
 
 const ACCEPT = '.mp3,.mp4,.mpeg,.mpga,.m4a,.wav,.webm,.flac,.ogg';
 const LANGUAGES = [
@@ -63,6 +64,7 @@ export default function UploadPage() {
       <button className="library-button" onClick={() => router.push('/lessons')}>My Lessons</button>
     </header>
     <div className="upload-content">
+      <FeatureTabs />
       <div className="hero-brand"><span className="hero-mark">↗</span><span className="hero-name">shadow</span></div>
       <p className="intro">Upload a video or audio clip. We’ll transcribe it, find the natural sentence breaks, and build your practice lesson.</p>
 

@@ -1,0 +1,48 @@
+.feature-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 4px;
+    margin: 0 auto 26px;
+    width: fit-content;
+    border: 1px solid var(--line);
+    border-radius: 13px;
+    background: rgba(255, 255, 255, .7);
+    box-shadow: var(--shadow)
+}
+
+.feature-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 8px 15px;
+    border-radius: 9px;
+    font-size: 13px;
+    font-weight: 650;
+    color: #5d6b62;
+    text-decoration: none;
+    transition: background .15s, color .15s
+}
+
+.feature-tab span {
+    font-size: 12px;
+    color: #8fa396
+}
+
+.feature-tab:hover {
+    background: var(--green-pale);
+    color: var(--ink)
+}
+
+.feature-tab.active {
+    background: var(--green);
+    color: #fff
+}
+
+.feature-tab.active span {
+    color: #cfeedd
+}
+
+.feature-tab:focus-visible {
+    outline: 3px solid #99cfaa;
+    outline-offset: 2px
+}
